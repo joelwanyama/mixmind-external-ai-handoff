@@ -1,0 +1,1843 @@
+--- PAGE 1 ---
+# Phase 20 Regression Analysis: Canonical Master Beta Play/Seek Failure After Stale -
+PlanSet Policy 
+ 
+## Most likely root cause 
+ 
+The regression is very likely caused by this implementation detail:  
+ 
+```text 
+cache.status() 
+  -> isCurrent(current) 
+    -> MasterPlanSet.build() 
+``` 
+ 
+That makes PlanSet status a **state -changing operation**. 
+ 
+A status check must be read-only. If `status()` or `isCurrent()` can build, replace, rewrite, 
+or normalize a PlanSet, then a normal Play command can mutate the tra nsport/plan 
+state while: 
+ 
+```text 
+a canonical controller is still active,  
+a stabilized seek state still exists,  
+the UI loop is still running, 
+the source ledger still references an old session,  
+or the coordinator still holds an old controller/plan fingerpri nt. 
+``` 
+ 
+This can produce exactly the observed behavior:  
+
+--- PAGE 2 ---
+ 
+```text 
+Play works initially. 
+Seek works initially. 
+Later Play moves the timer but produces no audio.  
+Seek does not restore correct transport.  
+Stop does not return to a clean restartable state.  
+``` 
+ 
+The second likely contributor is:  
+ 
+```text 
+Canonical beta start calls internal legacy Stop.  
+``` 
+ 
+If that internal legacy Stop performs full legacy side effects — resetting `currentTime`, 
+`mixStartTime`, `trackStartTimes`, stopping the UI loop, stopping th e visualizer, or 
+updating the Play button — it can silently destroy canonical transport state during a start 
+or seek transaction. 
+ 
+So the probable failure combination is:  
+ 
+```text 
+Side-effecting PlanSet status 
++ 
+internal legacy Stop used inside canonical s tart 
++ 
+non-terminal teardown events ignored by coordinator  
+
+--- PAGE 3 ---
+= 
+main transport/UI state desynchronized from canonical audio graph  
+``` 
+ 
+--- 
+ 
+# 1. Can `cache.status()` or `isCurrent()` rebuilding a PlanSet corrupt state while 
+canonical controller is active? 
+ 
+Yes. This is unsafe. 
+ 
+A PlanSet status function must answer: 
+ 
+```text 
+Does a PlanSet exist? 
+Is it sealed? 
+Does its fingerprint match the current timeline/transitions/policy?  
+``` 
+ 
+It must not do any of the following:  
+ 
+```text 
+Build a new PlanSet. 
+Replace the cached PlanSet. 
+Mutate transitions. 
+Mutate timeline metadata. 
+Rewrite fingerprints. 
+
+--- PAGE 4 ---
+Reset transport state. 
+Change currentTime. 
+Change trackStartTimes. 
+Invalidate an active controller. 
+Stop or start UI loops. 
+``` 
+ 
+If `isCurrent()` calls `MasterPlanSet.bui ld()`, then a status check can create a new 
+PlanSet object while the canonical controller is still using the previous one.  
+ 
+That can cause these failures:  
+ 
+## 1.1 Active controller references an old PlanSet  
+ 
+The coordinator may hold: 
+ 
+```js 
+activeController.planFingerprint = oldFingerprint  
+``` 
+ 
+but `cache.status()` may replace the cached plan with:  
+ 
+```js 
+newFingerprint 
+``` 
+ 
+Now the controller and cache disagree.  
+
+--- PAGE 5 ---
+ 
+Possible consequence: 
+ 
+```text 
+Controller believes it owns one plan.  
+Main UI reads timing from another plan.  
+Play/Seek commands validate against another plan.  
+Audio graph and UI state diverge.  
+``` 
+ 
+## 1.2 Plan rebuild may change timing metadata  
+ 
+A rebuild may change: 
+ 
+```text 
+totalDuration 
+mixStartTime 
+trackStartTimes 
+transition global starts 
+effective transition durations 
+``` 
+ 
+If that happens while canonical beta is active or immediately before start, the UI 
+scrubber can move using one timing model while the audio session uses another.  
+ 
+That can produce: 
+ 
+
+--- PAGE 6 ---
+```text 
+timer advances, 
+but no audible source is connected correctly. 
+``` 
+ 
+## 1.3 Build may trigger cleanup internally  
+ 
+If `MasterPlanSet.build()` internally stops playback, clears sources, or touches 
+`AudioEngine`, then calling it from `status()` can perform a hidden Stop during  a Play or 
+Seek command. 
+ 
+That is especially dangerous in a queued transport architecture.  
+ 
+## 1.4 Repeated status calls can repeatedly rebuild  
+ 
+If the fingerprint is unstable — for example, if it accidentally includes transient state 
+such as `currentTime`, `isPlaying`, UI selection, or temporary fallback flags — then 
+`isCurrent()` may decide the plan is stale every time.  
+ 
+That can cause: 
+ 
+```text 
+status -> rebuild -> status -> rebuild 
+``` 
+ 
+or: 
+ 
+```text 
+
+--- PAGE 7 ---
+Play -> status rebuild -> controller start -> status rebuild -> transport corruption 
+``` 
+ 
+This matches the “worked once, then broke” pattern. 
+ 
+--- 
+ 
+# 2. Should fingerprint comparison be pure and never call `build()`?  
+ 
+Yes. 
+ 
+Fingerprint comparison must be a **pure read -only comparison**. 
+ 
+The correct separation is: 
+ 
+```text 
+Status: 
+  read current inputs 
+  compute current fingerprint  
+  compare with stored sealed fingerprint  
+  return MISSING / STALE / CURRENT 
+ 
+Build: 
+  explicit command 
+  only when stopped 
+  creates/seals a PlanSet 
+  writes cache 
+
+--- PAGE 8 ---
+``` 
+ 
+Status must never build. 
+ 
+Recommended rule: 
+ 
+```text 
+MasterPlanSet.build() may only be called by:  
+  explicit Build Initial PlanSet command  
+  explicit Rebuild Master Plans command  
+ 
+MasterPlanSet.build() must never be called by:  
+  cache.status() 
+  isCurrent() 
+  Play validation 
+  Seek validation 
+  UI rendering 
+  scrubber updates 
+  controller event callbacks  
+``` 
+ 
+--- 
+ 
+# 3. Should stale detection happen only while stopped, or can it run during canonical 
+playback? 
+ 
+## Detection may be pure anytime  
+
+--- PAGE 9 ---
+ 
+Stale detection itself can run at any time if it is pure:  
+ 
+```text 
+compute current fingerprint 
+compare stored fingerprint 
+return status 
+``` 
+ 
+That is safe. 
+ 
+## Enforcement must not mutate during active playback  
+ 
+But stale enforcement must not rebuild, replace, or invalidate the a ctive canonical 
+session from inside a status call.  
+ 
+Safe policy: 
+ 
+```text 
+Before Play: 
+  pure status check 
+  if missing/stale: refuse or explicit build command  
+ 
+Before Seek: 
+  pure status check only if needed  
+  do not rebuild during seek 
+ 
+
+--- PAGE 10 ---
+During playback: 
+  do not call status repeatedly from UI loops  
+  do not rebuild while canonical controller is active  
+  if timeline edits make the plan stale, stop safely at a transport boundary  
+``` 
+ 
+If the plan becomes stale during playback because the user edited the time line, the 
+safest behavior is: 
+ 
+```text 
+Mark plan stale. 
+Stop canonical playback safely with visible message.  
+Require rebuild before next Play. 
+``` 
+ 
+Do not silently rebuild under the active controller.  
+ 
+--- 
+ 
+# 4. Exact state that must be reset before canoni cal Play 
+ 
+Canonical Play must begin from a known clean transport state.  
+ 
+The required reset depends on the previous state.  
+ 
+--- 
+ 
+
+--- PAGE 11 ---
+## 4.1 After a stabilized seek 
+ 
+If the user seeks and playback becomes stabilized, then later presses Play:  
+ 
+### If Play should resume stabilized playback  
+ 
+Required state before start: 
+ 
+```text 
+Canonical session token incremented.  
+Previous stable source stopped if still active.  
+Source ledger cleared. 
+Session bus disconnected or muted, then reconnected for new session.  
+activeController set to canonical beta. 
+PlanSet status pure CURRENT. 
+currentTime set to stored stabilized global time.  
+mixStartTime and trackStartTimes set from the current sealed PlanSet.  
+UI update loop started exactly once.  
+Visualizer started exactly once. 
+Play button updated exactly once. 
+futureChainScheduled = false. 
+``` 
+ 
+Do not rebuild the full chain automatically. 
+ 
+### If Play should restart the full canonical chain  
+ 
+
+--- PAGE 12 ---
+This should require an explicit full-chain restart condition, such as:  
+ 
+```text 
+currentTime <= 0.05 
+``` 
+ 
+or an explicit: 
+ 
+```text 
+Restart Canonical Mix 
+``` 
+ 
+Required reset: 
+ 
+```text 
+currentTime = 0 
+clear stabilized target 
+stop previous canonical session  
+clear source ledger 
+disconnect old session bus 
+increment session token 
+validate pure PlanSet status CURRENT 
+connect new session bus 
+start full chain 
+set canonicalSubState = FULL_CHAIN  
+start UI once 
+``` 
+
+--- PAGE 13 ---
+ 
+--- 
+ 
+## 4.2 After a completed beta session 
+ 
+If the canonical beta session completed naturally:  
+ 
+Required state before Play: 
+ 
+```text 
+isPlaying = false 
+state = COMPLETED or STOPPED_COMPLETION  
+source ledger empty 
+session bus disconnected or muted  
+UI loop stopped 
+visualizer stopped 
+activeController may remain as metadata but must not be considered playing  
+``` 
+ 
+Before next Play: 
+ 
+```text 
+If completion was full-chain end: 
+  currentTime = 0 
+  start full chain 
+ 
+If completion was stabilized-track end: 
+
+--- PAGE 14 ---
+  either replay stabilized track from its owning -track beginning 
+  or require explicit restart/seek 
+  do not automatically rebuild future chain  
+``` 
+ 
+In all cases: 
+ 
+```text 
+Increment session token. 
+Clear ledger. 
+Reconnect session bus. 
+Validate pure PlanSet status. 
+Start UI once. 
+``` 
+ 
+--- 
+ 
+## 4.3 After a user Stop 
+ 
+User Stop must produce a clean restartable state.  
+ 
+Required final Stop state: 
+ 
+```text 
+state = STOPPED 
+isPlaying = false 
+activeController = null or inactive canonical controller  
+
+--- PAGE 15 ---
+source ledger empty 
+session bus disconnected or muted  
+UI loop stopped 
+visualizer stopped 
+Play button shows stopped 
+currentTime either retained by policy or reset to 0  
+canonicalSubState retained only as metadata for next Play  
+``` 
+ 
+Before next Play: 
+ 
+```text 
+Pure PlanSet status must be CURRENT. 
+Start reset must run even if Stop already cleaned up.  
+Session token must be incremented.  
+No old scheduled sources may remain.  
+``` 
+ 
+--- 
+ 
+## 4.4 After a stale-plan refusal 
+ 
+If Play is refused because the PlanSet is stale:  
+ 
+Required state: 
+ 
+```text 
+
+--- PAGE 16 ---
+state = STOPPED_STALE_PLAN or REFUSED_STALE 
+isPlaying = false 
+activeController = null 
+source ledger empty 
+session bus disconnected 
+UI loop stopped 
+visualizer stopped 
+currentTime should not be treated as playable canonical position  
+stabilized target should not be trusted  
+``` 
+ 
+Do not start canonical playback. 
+ 
+Do not silently fall back to legacy. 
+ 
+The only valid next actions are: 
+ 
+```text 
+Rebuild Master Plans 
+or 
+user manually disables Canonical Master Beta and uses legacy playback  
+``` 
+ 
+--- 
+ 
+## 4.5 After a rebuild 
+ 
+
+--- PAGE 17 ---
+Rebuild must produce: 
+ 
+```text 
+new sealed PlanSet 
+new stored fingerprint 
+new planEpoch or planVersion 
+transport stopped 
+currentTime reset to 0 recommended 
+stabilized target cleared 
+activeController null 
+source ledger empty 
+session token invalidated/incremented  
+UI loop stopped 
+visualizer stopped 
+``` 
+ 
+Then Play after rebuild may start:  
+ 
+```text 
+full canonical chain from 0 
+``` 
+ 
+Do not automatically resume an old stabilized position after rebuild unless you add 
+explicit validation that the old global time still maps correctly into the new PlanSet. For 
+Phase 20, the safest rule is: 
+ 
+```text 
+Rebuild resets canonical transport to 0.  
+
+--- PAGE 18 ---
+``` 
+ 
+--- 
+ 
+# 5. Can `teardown(false, 'START')` leave state inconsistent?  
+ 
+Yes. 
+ 
+`teardown(false, 'START')` is dangerous if it combines:  
+ 
+```text 
+non-terminal canonical teardown  
+``` 
+ 
+with: 
+ 
+```text 
+internal legacy Stop side effects 
+``` 
+ 
+The main coordinator is designed to ignore  non-terminal beta events. That is correct for 
+seek transactions. But if the same non -terminal teardown path calls internal legacy 
+Stop, and that legacy Stop resets:  
+ 
+```text 
+AudioEngine.currentTime 
+AudioEngine.mixStartTime 
+AudioEngine.trackStartTimes 
+
+--- PAGE 19 ---
+AudioEngine.isPlaying 
+UI update loop 
+visualizer 
+Play button 
+``` 
+ 
+then the coordinator may believe canonical beta is starting or still owns transport, while 
+the underlying AudioEngine display state has been reset to legacy stopped state.  
+ 
+This can produce: 
+ 
+```text 
+UI timer moves because a later start sets isPlaying true,  
+but session bus/source graph is not correctly connected,  
+or controller ownership was cleared by legacy Stop,  
+or timing metadata was reset underneath the canonical controller.  
+``` 
+ 
+So yes: 
+ 
+> `teardown(false, 'START')` can leave main transport/UI/controller state inconsistent if 
+internal legacy Stop performs full transport resets.  
+ 
+The fix is to separate: 
+ 
+```text 
+canonical session teardown 
+``` 
+
+--- PAGE 20 ---
+ 
+from: 
+ 
+```text 
+legacy full stop 
+``` 
+ 
+and from: 
+ 
+```text 
+legacy source cleanup only 
+``` 
+ 
+--- 
+ 
+# 6. Should canonical beta start have a separate `RESET_FOR_START` transaction?  
+ 
+Yes. 
+ 
+Start and seek have different invariants.  
+ 
+## Seek teardown 
+ 
+Seek teardown must be non-terminal and must preserve canonical transport ownership: 
+ 
+```text 
+SEEKING 
+
+--- PAGE 21 ---
+  -> TEARDOWN 
+  -> STABILIZING 
+  -> STABILIZED 
+``` 
+ 
+It must not emit: 
+ 
+```text 
+terminal STOPPED 
+``` 
+ 
+It must not clear main coordinator ownership unless the seek fatally fails.  
+ 
+## Start reset 
+ 
+Start reset must prepare a fresh canonical session. It should be its own transaction:  
+ 
+```text 
+START_REQUESTED 
+  -> PLAN_STATUS_PURE 
+  -> START_RESET 
+  -> START_CONNECT 
+  -> START_RUNNING 
+``` 
+ 
+or for stabilized resume: 
+ 
+
+--- PAGE 22 ---
+```text 
+START_REQUESTED 
+  -> PLAN_STATUS_PURE 
+  -> STABILIZED_START_RESET 
+  -> STABILIZED_CONNECT 
+  -> STABILIZED_RUNNING 
+``` 
+ 
+`RESET_FOR_START` should: 
+ 
+```text 
+Stop previous canonical session safely. 
+Clear source ledger. 
+Disconnect old session bus. 
+Increment session token. 
+Set activeController to the new session. 
+Set timing metadata from the sealed PlanSet.  
+Start UI/visualizer exactly once.  
+``` 
+ 
+It should not use the same semantics as seek teardown.  
+ 
+--- 
+ 
+# 7. How PlanSet rebuild should interact with transport state  
+ 
+PlanSet rebuild is a destructive operation for canonical playback state.  
+
+--- PAGE 23 ---
+ 
+It must not occur while canonical playback is active.  
+ 
+## Recommended rebuild sequence  
+ 
+```text 
+User clicks Rebuild Master Plans  
+  -> if canonical active: stop canonical safely first  
+  -> set transport state to STOPPED_REBUILDING  
+  -> invalidate active controller  
+  -> increment planEpoch 
+  -> build new Master PlanSet  
+  -> seal new PlanSet 
+  -> store new fingerprint 
+  -> reset currentTime to 0 
+  -> clear stabilized target 
+  -> clear trackStartTimes/mixStartTime and replace from new plan  
+  -> clear source ledger 
+  -> stop UI loop 
+  -> stop visualizer 
+  -> set state STOPPED_PLAN_READY  
+``` 
+ 
+## Interaction details 
+ 
+### currentTime 
+ 
+
+--- PAGE 24 ---
+Recommended: 
+ 
+```text 
+Rebuild resets currentTime to 0. 
+``` 
+ 
+Reason: 
+ 
+The old global position may not be valid in the new PlanSet if transition durations, track 
+order, offsets, or fallback recipes changed. 
+ 
+If you later want to preserve position, you must add a explicit mapping step:  
+ 
+```text 
+old global time -> new owning track -> new local offset 
+``` 
+ 
+Do not add that in the initial repair. 
+ 
+### mixStartTime 
+ 
+Replace from the new sealed PlanSet.  
+ 
+Do not allow legacy Stop or rebuild to leave a stale legacy `mixStartTime` visible while 
+canonical beta is next started.  
+ 
+### trackStartTimes 
+ 
+
+--- PAGE 25 ---
+Replace from the new sealed PlanSet.  
+ 
+The scrubber must use canonical trackStartTimes when canonical beta is active.  
+ 
+### activeController 
+ 
+Rebuild must clear: 
+ 
+```text 
+activeController 
+activeControllerSessionId 
+canonicalSubState 
+stabilizedTarget 
+``` 
+ 
+or mark them invalid. 
+ 
+### session token 
+ 
+Rebuild must increment: 
+ 
+```text 
+planEpoch 
+controllerSessionToken 
+``` 
+ 
+Any old controller events must be ignored.  
+
+--- PAGE 26 ---
+ 
+### UI update loop 
+ 
+Rebuild while stopped should leave UI loop stopped.  
+ 
+If rebuild is triggered while playing, playback must first stop and UI loop must stop.  
+ 
+### visualizer 
+ 
+Rebuild should not start the visualizer. 
+ 
+If playback was active, stop visualizer during the safe stop before rebuild.  
+ 
+### source ledger 
+ 
+Rebuild must require: 
+ 
+```text 
+source ledger empty 
+``` 
+ 
+If not empty, stop and clear before completing rebuild.  
+ 
+--- 
+ 
+# 8. Strict state-machine transition table 
+ 
+
+--- PAGE 27 ---
+The following is proposed MixMind transport behavior.  
+ 
+## States 
+ 
+```text 
+STOPPED_NO_PLAN 
+STOPPED_STALE_PLAN 
+STOPPED_PLAN_READY 
+STOPPED_STABILIZED_POSITION 
+BUILDING_INITIAL_PLAN 
+REBUILDING_PLAN 
+CANONICAL_START_RESET 
+CANONICAL_FULL_CHAIN  
+CANONICAL_SEEKING 
+CANONICAL_STABILIZED 
+STOPPING 
+COMPLETED 
+ERROR 
+``` 
+ 
+--- 
+ 
+## Full-chain Play 
+ 
+| From | Trigger | Guard | Intermediate | To | 
+|---|---|---|---|---| 
+
+--- PAGE 28 ---
+| `STOPPED_PLAN_READY` | Play from 0 | pure status CURRENT | 
+`CANONICAL_START_RESET` | `CANONICAL_FULL_CHAIN` |  
+| `STOPPED_NO_PLAN` | Play | policy allows initial build | `BUILDING_INITIAL_PLAN` 
+-> `STOPPED_PLAN_READY` -> `CANONICAL_START_RESET` | 
+`CANONICAL_FULL_CHAIN` |  
+| `STOPPED_STALE_PLAN` | Play | none | refused | `STOPPED_STALE_PLAN` |  
+ 
+Side effects for successful full-chain start: 
+ 
+```text 
+currentTime = 0 
+stabilized target cleared 
+source ledger cleared 
+session bus connected 
+session token incremented 
+UI started once 
+visualizer started once 
+Play button updated once 
+``` 
+ 
+--- 
+ 
+## Seek stabilization 
+ 
+| From | Trigger | Guard | Intermediate | To | 
+|---|---|---|---|---| 
+| `CANONICAL_FULL_CHAIN` | Seek | pure status still CURRENT | 
+`CANONICAL_SEEKING` | `CANONICAL_STABILIZED` |  
+
+--- PAGE 29 ---
+| `CANONICAL_STABILIZED` | Seek | pure status still CURRENT | 
+`CANONICAL_SEEKING` | `CANONICAL_STABILIZED` |  
+| `STOPPED_PLAN_READY` | Seek while stopped | pure status CURRENT | no audio 
+start | `STOPPED_STABILIZED_POSITION` | 
+ 
+Side effects: 
+ 
+```text 
+Non-terminal teardown only. 
+No terminal STOPPED event. 
+No future chain scheduled. 
+Session bus reconnected before stable source starts.  
+Exactly one stable Master source after seek.  
+UI remains active if playback was active. 
+``` 
+ 
+--- 
+ 
+## Stop 
+ 
+| From | Trigger | Intermediate | To | 
+|---|---|---|---| 
+| `CANONICAL_FULL_CHAIN` | Stop | `STOPPING` | `STOPPED_PLAN_READY` |  
+| `CANONICAL_STABILIZED` | Stop | `STOPPING` | `STOPPED_PLAN_READY` or 
+`STOPPED_STABILIZED_POSITION` | 
+| `CANONICAL_SEEKING` | Stop | `STOPPING` | `STOPPED_PLAN_READY` or 
+`STOPPED_STABILIZED_POSITION` | 
+| `COMPLETED` | Stop | none | `STOPPED_PLAN_READY` |  
+
+--- PAGE 30 ---
+ 
+Side effects: 
+ 
+```text 
+Terminal stop. 
+Source ledger empty. 
+Session bus disconnected or muted. 
+UI loop stopped. 
+Visualizer stopped. 
+Play button updated. 
+isPlaying = false. 
+``` 
+ 
+--- 
+ 
+## Play after seek 
+ 
+| From | Trigger | Guard | To | 
+|---|---|---|---| 
+| `STOPPED_STABILIZED_POSITION` | Play | pure status CURRENT | 
+`CANONICAL_STABILIZED` | 
+| `STOPPED_STABILIZED_POSITION` | Explicit Restart Full Mix | currentTime reset to 
+0 | `CANONICAL_FULL_CHAIN` |  
+| `CANONICAL_STABILIZED` | Play while already playing | no duplicate start | remain 
+`CANONICAL_STABILIZED` | 
+ 
+Important: 
+ 
+
+--- PAGE 31 ---
+```text 
+Normal Play after stabilized seek should resume/start stabilized playback.  
+It should not automatically rebuild the full chain.  
+``` 
+ 
+--- 
+ 
+## Stale-plan refusal 
+ 
+| From | Trigger | Guard | To | 
+|---|---|---|---| 
+| `STOPPED_PLAN_READY` | Play | pure status ST ALE | `STOPPED_STALE_PLAN` | 
+| `STOPPED_NO_PLAN` | Play | pure status MISSING and no initial build allowed | 
+`STOPPED_NO_PLAN` | 
+| Any active canonical state | Plan becomes stale due to edit | safe stop | 
+`STOPPED_STALE_PLAN` | 
+ 
+Side effects: 
+ 
+```text 
+No canonical audio starts. 
+No silent legacy fallback. 
+Visible stale plan message. 
+Rebuild action available. 
+``` 
+ 
+--- 
+ 
+
+--- PAGE 32 ---
+## Rebuild 
+ 
+| From | Trigger | Guard | To | 
+|---|---|---|---| 
+| `STOPPED_STALE_PLAN` | Rebuild Master Plans | transport stopped | 
+`REBUILDING_PLAN` -> `STOPPED_PLAN_READY` |  
+| `STOPPED_NO_PLAN` | Build Initial PlanSet | transport stopped | 
+`BUILDING_INITIAL_PLAN` -> `STOPPED_PLAN_READY` |  
+| `STOPPED_PLAN_READY` | Rebuild Master Plans | transport stopped | 
+`REBUILDING_PLAN` -> `STOPPED_PLAN_READY` | 
+| Active canonical state | Rebuild Master Plans | must stop first | `STOPPING` -> 
+`REBUILDING_PLAN` -> `STOPPED_PLAN_READY` |  
+ 
+Side effects: 
+ 
+```text 
+Old PlanSet replaced only by explicit rebuild.  
+currentTime reset to 0 recommended. 
+stabilized target cleared. 
+activeController cleared. 
+source ledger empty. 
+UI loop stopped. 
+visualizer stopped. 
+``` 
+ 
+--- 
+ 
+## Play after rebuild 
+
+--- PAGE 33 ---
+ 
+| From | Trigger | Guard | To | 
+|---|---|---|---| 
+| `STOPPED_PLAN_READY` | Play from 0 | pure status CURRENT | 
+`CANONICAL_START_RESET` -> `CANONICAL_FULL_CHAIN` |  
+ 
+Side effects: 
+ 
+```text 
+New plan fingerprint used. 
+New session token. 
+New source ledger session. 
+UI started once. 
+``` 
+ 
+--- 
+ 
+# 9. Pure PlanSet fingerprint/status design  
+ 
+The PlanSet cache should expose pure status  functions. 
+ 
+## 9.1 Fingerprint inputs 
+ 
+The fingerprint should include only plan -building inputs, not transient playback state.  
+ 
+Include: 
+ 
+
+--- PAGE 34 ---
+```text 
+plan schema version 
+planner version 
+master fallback policy version 
+canonical Master-only execution policy version 
+timeline track order 
+track IDs 
+track replacement/version tokens  
+track duration/trim/offset versions 
+master analysis versions 
+transition types 
+transition requested durations 
+manual transition override flags  
+force-master lock provenance, if part of plan  input 
+``` 
+ 
+Do not include: 
+ 
+```text 
+currentTime 
+isPlaying 
+scrubber position 
+UI selection 
+visualizer state 
+activeController 
+session token 
+legacy playback mode 
+
+--- PAGE 35 ---
+temporary refusal state 
+``` 
+ 
+--- 
+ 
+## 9.2 Pure fingerprint function  
+ 
+```js 
+function computeMasterPlanSetFingerprint(inputs) {  
+  const parts = [ 
+    inputs.schemaVersion, 
+    inputs.plannerVersion, 
+    inputs.fallbackPolicyVersion, 
+    inputs.masterOnlyPolicyVersion, 
+ 
+    inputs.timelineTrackOrder.join("|"), 
+ 
+    ...inputs.tracks.map(track => [  
+      track.id, 
+      track.versionToken, 
+      track.durationRoundedMs, 
+      track.offsetRoundedMs, 
+      track.masterAnalysisVersion 
+    ].join(":")), 
+ 
+    ...inputs.transitions.map(transition => [  
+      transition.id, 
+
+--- PAGE 36 ---
+      transition.type, 
+      transition.requestedDurationRoundedMs,  
+      transition.manual ? "manual" : "auto",  
+      transition.forceMasterLockKind || "none"  
+    ].join(":")) 
+  ]; 
+ 
+  return deterministicHash(parts.join("||"));  
+} 
+``` 
+ 
+This function must not: 
+ 
+```text 
+call MasterPlanSet.build() 
+write to cache 
+mutate inputs 
+reset transport 
+touch AudioEngine 
+``` 
+ 
+--- 
+ 
+## 9.3 Pure status function 
+ 
+```js 
+function getMasterPlanSetStatus() {  
+
+--- PAGE 37 ---
+  const currentInputs = getCurrentMasterPlanInputs();  
+  const currentFingerprint = compute MasterPlanSetFingerprint(currentInputs);  
+ 
+  const stored = MasterPlanSetCache.get();  
+ 
+  if (!stored) { 
+    return { 
+      state: "MISSING", 
+      currentFingerprint, 
+      storedFingerprint: null, 
+      planSet: null, 
+      reason: "No Master PlanSet exists." 
+    }; 
+  } 
+ 
+  if (!stored.sealed) { 
+    return { 
+      state: "NOT_SEALED", 
+      currentFingerprint, 
+      storedFingerprint: stored.fingerprint,  
+      planSet: null, 
+      reason: "Stored Master PlanSet is not sealed."  
+    }; 
+  } 
+ 
+  if (stored.fingerprint !== currentFingerprint) {  
+    return { 
+
+--- PAGE 38 ---
+      state: "STALE", 
+      currentFingerprint, 
+      storedFingerprint: stored.fingerprint,  
+      planSet: null, 
+      reason: "Stored Master PlanSet does not match current timeline/transitio ns." 
+    }; 
+  } 
+ 
+  return { 
+    state: "CURRENT", 
+    currentFingerprint, 
+    storedFingerprint: stored.fingerprint,  
+    planSet: stored.planSet, 
+    reason: null 
+  }; 
+} 
+``` 
+ 
+This status function is pure with respect to PlanSet construction.  
+ 
+It may read cache. It must not build cache.  
+ 
+--- 
+ 
+## 9.4 Explicit build commands 
+ 
+```js 
+
+--- PAGE 39 ---
+async function buildInitialMasterPlanSetCommand() {  
+  // Must run only while transport is stopped.  
+  // Must not be called by getMasterPlanSetStatus().  
+} 
+ 
+async function rebuildMasterPlanSetsCommand() { 
+  // Must run only while transport is stopped,  
+  // or must first stop canonical playback safely.  
+} 
+``` 
+ 
+--- 
+ 
+# 10. Diagnostic fields needed  
+ 
+Add a diagnostic panel or console object like this:  
+ 
+```js 
+window.__mixMindPhase20Diagnostics = { 
+  transport: { 
+    state: null, 
+    isPlaying: false, 
+    uiLoopActive: false, 
+    visualizerActive: false, 
+    playButtonState: null, 
+    currentTime: null, 
+    mixStartTime: null, 
+
+--- PAGE 40 ---
+    totalDuration: null 
+  }, 
+ 
+  canonical: { 
+    activeControllerPresent: false,  
+    coordinatorActiveControllerId: null,  
+    controllerSessionId: null,  
+    controllerMatchesCoordinator: false,  
+    controllerPlanFingerprint: null,  
+    sessionToken: null, 
+    sessionBusConnected: false,  
+    sourceLedgerCount: null, 
+    activeAudibleSources: null, 
+    scheduledSources: null,  
+    chainState: null, 
+    stabilizedTarget: null, 
+    lastTeardownReason: null, 
+    terminalStoppedEvents: null,  
+    nonTerminalTeardownEvents: null 
+  }, 
+ 
+  planSet: { 
+    exists: false, 
+    sealed: false, 
+    status: null, 
+    storedFingerprint: null,  
+    currentFingerprint: null,  
+
+--- PAGE 41 ---
+    planEpoch: null, 
+    lastBuildReason: null,  
+    statusCalls: 0, 
+    buildCalls: 0, 
+    statusSideEffectBuilds: 0 
+  }, 
+ 
+  legacy: { 
+    legacyStopFullCalls: 0, 
+    legacyCleanupOnlyCalls: 0,  
+    legacyStopDuringCanonicalOwner: 0,  
+    legacyStopResetCurrentTimeDuringCanonical: 0,  
+    legacyStopResetTrackStartTimesDuringCanonical: 0,  
+    legacyStopStoppedUILoopDuringCanonical: 0  
+  }, 
+ 
+  audioProof: { 
+    audioContextState: null, 
+    masterRMS: null, 
+    sessionAnalyserRMS: null  
+  } 
+}; 
+``` 
+ 
+--- 
+ 
+## 10.1 Timer without audio 
+
+--- PAGE 42 ---
+ 
+Detect with: 
+ 
+```text 
+transport.uiLoopActive === true  
+transport.isPlaying === true 
+AND 
+( 
+  canonical.sourceLedgerCount === 0  
+  OR canonical.sessionBusConnected === false  
+  OR audioProof.masterRMS approximately zero while source should be audible  
+) 
+``` 
+ 
+Likely causes: 
+ 
+```text 
+UI loop not stopped after teardown.  
+Canonical controller state says playing but no source exists.  
+Session bus disconnected. 
+Start failed but isPlaying remained true.  
+``` 
+ 
+--- 
+ 
+## 10.2 Source bus disconnected  
+ 
+
+--- PAGE 43 ---
+Detect with: 
+ 
+```text 
+canonical.sessionBusConnected === false  
+AND transport.state is CANONICAL_FULL_CHAIN or CANONICAL_STABILIZED 
+``` 
+ 
+Likely causes: 
+ 
+```text 
+Seek teardown disconnected bus and stabilized start did not reconnect.  
+Start reset disconnected bus and start failed.  
+Stop cleanup ran during start. 
+``` 
+ 
+--- 
+ 
+## 10.3 Stale controller reference  
+ 
+Detect with: 
+ 
+```text 
+canonical.activeControllerPresent === true  
+AND canonical.controllerMatchesCoordinator === false  
+``` 
+ 
+or: 
+
+--- PAGE 44 ---
+ 
+```text 
+canonical.controllerSessionId !== coordinator.activeControllerSessionId  
+``` 
+ 
+or: 
+ 
+```text 
+canonical.controllerPlanFingerprint !== planSet.storedFingerprint  
+``` 
+ 
+Likely causes: 
+ 
+```text 
+cache.status() rebuilt PlanSet under active controller.  
+Rebuild happened without clearing controller.  
+Coordinator dropped controller but UI still reads it.  
+``` 
+ 
+--- 
+ 
+## 10.4 Stale PlanSet 
+ 
+Detect with: 
+ 
+```text 
+planSet.status === "STALE" 
+
+--- PAGE 45 ---
+planSet.currentFingerprint !== planSet.storedFingerprint  
+``` 
+ 
+Likely causes: 
+ 
+```text 
+Timeline/transitions changed after seal.  
+Policy version changed. 
+Track analysis changed. 
+Build side effect mutated plan inputs.  
+``` 
+ 
+--- 
+ 
+## 10.5 Source ledger empty 
+ 
+Detect with: 
+ 
+```text 
+canonical.sourceLedgerCount === 0  
+``` 
+ 
+If transport says playing, this is a failure.  
+ 
+Likely causes: 
+ 
+```text 
+
+--- PAGE 46 ---
+Start did not create source. 
+Teardown ran after start. 
+Internal legacy Stop cleared sources. 
+Seek teardown cleared sources and stable source start failed.  
+``` 
+ 
+--- 
+ 
+## 10.6 UI loop still active 
+ 
+Detect with: 
+ 
+```text 
+transport.uiLoopActive === true  
+AND transport.state is STOPPED / STOPPED_STALE_PLAN / REFUSED / 
+COMPLETED / ERROR 
+``` 
+ 
+Likely causes: 
+ 
+```text 
+Stop did not stop UI loop. 
+Non-terminal teardown left UI running.  
+Internal legacy Stop stopped audio but not UI.  
+Start failed but UI loop remained.  
+``` 
+ 
+
+--- PAGE 47 ---
+--- 
+ 
+## 10.7 Internal legacy Stop accidentally resetting canonical state  
+ 
+Detect with: 
+ 
+```text 
+legacy.legacyStopDuringCanonicalOwner > 0 
+``` 
+ 
+or: 
+ 
+```text 
+legacy.legacyStopResetCurrentTimeDuringCanonical > 0  
+legacy.legacyStopResetTrackStartTimesDuringCanonical > 0  
+legacy.legacyStopStoppedUILoopDuringCanonical > 0  
+``` 
+ 
+Likely cause: 
+ 
+```text 
+Canonical beta start or seek is calling full legacy Stop instead of legacy cleanup -only. 
+``` 
+ 
+This is a primary suspect in the regression.  
+ 
+--- 
+
+--- PAGE 48 ---
+ 
+# 11. Minimal rollback-safe repair sequence 
+ 
+This sequence avoids rewriting the whole playback system a nd preserves legacy 
+behavior. 
+ 
+--- 
+ 
+## Step 1: Add rollback flag and diagnostics  
+ 
+Add a Phase 20 flag: 
+ 
+```js 
+window.MixMindPhase20Settings = { 
+  stalePlanSetPolicy: true, 
+  purePlanSetStatus: false,  
+  separateStartReset: false,  
+  legacyCleanupOnly: false 
+}; 
+``` 
+ 
+Add the diagnostics object above.  
+ 
+Acceptance: 
+ 
+```text 
+Diagnostics visible. 
+
+--- PAGE 49 ---
+No behavior change yet. 
+``` 
+ 
+--- 
+ 
+## Step 2: Make PlanSet status pure  
+ 
+Modify: 
+ 
+```text 
+cache.status() 
+isCurrent() 
+``` 
+ 
+Remove any call to: 
+ 
+```js 
+MasterPlanSet.build() 
+``` 
+ 
+Replace with pure fingerprint comparison.  
+ 
+Add counters: 
+ 
+```text 
+planSet.statusCalls 
+planSet.buildCalls 
+
+--- PAGE 50 ---
+planSet.statusSideEffectBuilds 
+``` 
+ 
+Acceptance: 
+ 
+```text 
+Calling status repeatedly does not change stored PlanSet.  
+statusSideEffectBuilds remains 0. 
+No transport state changes from status.  
+``` 
+ 
+This is the most important repair. 
+ 
+--- 
+ 
+## Step 3: Add explicit build/rebuild commands  
+ 
+Create: 
+ 
+```text 
+buildInitialMasterPlanSetCommand()  
+rebuildMasterPlanSetsCommand()  
+``` 
+ 
+Rules: 
+ 
+```text 
+
+--- PAGE 51 ---
+Only run while stopped. 
+If canonical active, stop safely first or refuse.  
+Never called from status. 
+Never called from isCurrent. 
+Never called from UI render. 
+``` 
+ 
+Acceptance: 
+ 
+```text 
+No PlanSet -> Play may trigger explicit initial build command.  
+Stale PlanSet -> Play refuses. 
+Rebuild button creates new sealed PlanSet.  
+Rebuild does not start playback.  
+``` 
+ 
+--- 
+ 
+## Step 4: Split legacy Stop 
+ 
+Create two internal functions:  
+ 
+```js 
+AudioEngine._legacyStopFullInternal()  
+AudioEngine._legacyCleanupOnlyInternal()  
+``` 
+ 
+
+--- PAGE 52 ---
+Full stop may: 
+ 
+```text 
+stop legacy sources, 
+stop preview, 
+reset legacy currentTime, 
+reset legacy mixStartTime/trackStartTimes,  
+stop UI loop, 
+stop visualizer, 
+update Play button. 
+``` 
+ 
+Cleanup-only must: 
+ 
+```text 
+stop legacy sources, 
+stop preview if needed, 
+clear legacy timers, 
+but NOT reset canonical currentTime, 
+but NOT reset canonical mixStartTime/trackStartTimes,  
+but NOT stop canonical UI loop, 
+but NOT stop canonical visualizer, 
+but NOT update Play button unless coordinator requests final sync.  
+``` 
+ 
+Canonical beta start and seek should use only:  
+ 
+
+--- PAGE 53 ---
+```js 
+AudioEngine._legacyCleanupOnlyInternal()  
+``` 
+ 
+Public legacy Stop may still use full stop.  
+ 
+Acceptance: 
+ 
+```text 
+Canonical start no longer resets canonical UI/time through legacy Stop.  
+legacyStopDuringCanonicalOwner r emains 0 during normal canonical Play/Seek.  
+``` 
+ 
+--- 
+ 
+## Step 5: Add separate `RESET_FOR_START` 
+ 
+Do not reuse seek teardown for start.  
+ 
+Implement: 
+ 
+```text 
+canonicalBeta.resetForStart(reason)  
+``` 
+ 
+It must: 
+ 
+
+--- PAGE 54 ---
+```text 
+increment session token, 
+stop previous canonical session, 
+clear ledger, 
+disconnect old session bus,  
+not emit terminal STOPPED to main coordinator unless start fails fatally,  
+not call legacy full Stop, 
+prepare for new session. 
+``` 
+ 
+Implement separate seek transaction:  
+ 
+```text 
+canonicalBeta.seekTransaction(target) 
+``` 
+ 
+It must: 
+ 
+```text 
+increment session token, 
+teardown non-terminal, 
+preserve transport ownership,  
+reconnect session bus before stable source,  
+emit STABILIZED non-terminal. 
+``` 
+ 
+Acceptance: 
+
+--- PAGE 55 ---
+ 
+```text 
+Play after seek starts correctly. 
+Seek after Play works. 
+Stop remains terminal. 
+No terminal STOPPED is emitted during seek.  
+``` 
+ 
+--- 
+ 
+## Step 6: Gate Play with pure status  
+ 
+Coordinator Play should do: 
+ 
+```text 
+1. Ensure AudioContext running. 
+2. Read pure PlanSet status. 
+3. If MISSING: 
+   run explicit initial build command if policy allows.  
+4. If STALE: 
+   refuse with visible stale-plan UI. 
+5. If CURRENT: 
+   run RESET_FOR_START. 
+   start canonical beta. 
+   set activeController. 
+   start UI/visualizer once. 
+``` 
+
+--- PAGE 56 ---
+ 
+No silent legacy fallback. 
+ 
+Acceptance: 
+ 
+```text 
+Stale PlanSet refuses playback visibly. 
+Current PlanSet starts canonical beta.  
+Missing PlanSet builds explicitly or refuses according to policy.  
+No status call builds a plan. 
+``` 
+ 
+--- 
+ 
+## Step 7: Make Stop force a clean state  
+ 
+Public Stop must not depend only on beta events.  
+ 
+Coordinator Stop should: 
+ 
+```text 
+set STOPPING, 
+call canonical beta terminal stop if active,  
+call legacy cleanup-only if needed, 
+set STOPPED, 
+stop UI loop, 
+stop visualizer, 
+
+--- PAGE 57 ---
+update Play button, 
+clear activeController or mark inactive.  
+``` 
+ 
+Acceptance: 
+ 
+```text 
+Stop always returns to clean restartable state.  
+Stop after seek works. 
+Stop after stale refusal does nothing harmful.  
+Stop after rebuild leaves transport stopped and ready.  
+``` 
+ 
+--- 
+ 
+## Step 8: Validate with regression tests 
+ 
+Minimum tests: 
+ 
+```text 
+1. Status call repeated 10 times while stopped:  
+   no build, no state change. 
+ 
+2. Status call during canonical playback:  
+   no build, no plan replacement, no audio change.  
+ 
+3. Play -> seek -> Play: 
+
+--- PAGE 58 ---
+   audio continues or restarts correctly, 
+   timer matches audio, 
+   no duplicate sources. 
+ 
+4. Play -> seek -> Stop -> Play: 
+   clean restart, 
+   no timer without audio. 
+ 
+5. Stale plan -> Play: 
+   refusal, 
+   no audio, 
+   no UI loop left active. 
+ 
+6. Stale plan -> Rebuild -> Play: 
+   new sealed plan, 
+   full chain starts from 0. 
+ 
+7. Toggle Canonical OFF after stale refusal: 
+   legacy playback remains available when user explicitly chooses legacy.  
+``` 
+ 
+--- 
+ 
+## Step 9: Rollback path 
+ 
+If any repair fails: 
+ 
+
+--- PAGE 59 ---
+```text 
+Disable Phase 20 stalePlanSetPolicy. 
+Restore pure status flag to off. 
+Return to previously validated Phase 19E behavior.  
+Legacy playback remains default when Canonical Master is OFF.  
+``` 
+ 
+Do not rollback by silently forcing legacy while Canonical Master is ON. That would hide 
+the PlanSet state and violate the Phase 20 policy.  
+ 
+--- 
+ 
+# 12. Unsafe design decisions to avoid  
+ 
+## 12.1 Status that builds 
+ 
+Unsafe: 
+ 
+```text 
+cache.status() -> MasterPlanSet.build() 
+``` 
+ 
+Safe: 
+ 
+```text 
+cache.status() -> pure fingerprint comparison 
+``` 
+
+--- PAGE 60 ---
+ 
+--- 
+ 
+## 12.2 Rebuilding during active playback  
+ 
+Unsafe: 
+ 
+```text 
+Canonical controller active 
+  -> status detects stale 
+  -> rebuild replaces plan under controller  
+``` 
+ 
+Safe: 
+ 
+```text 
+Detect stale purely. 
+Stop or refuse. 
+Rebuild only at stopped transport boundary. 
+``` 
+ 
+--- 
+ 
+## 12.3 Internal legacy Stop resetting canonical state  
+ 
+Unsafe: 
+ 
+
+--- PAGE 61 ---
+```text 
+Canonical start calls legacy full Stop.  
+Legacy full Stop resets currentTime, trackStartTimes, UI, visualizer.  
+``` 
+ 
+Safe: 
+ 
+```text 
+Canonical start calls legacy cleanup-only. 
+Coordinator owns UI/time synchronization.  
+``` 
+ 
+--- 
+ 
+## 12.4 Reusing seek teardown for start  
+ 
+Unsafe: 
+ 
+```text 
+teardown(false, 'START') 
+``` 
+ 
+with the same semantics as seek.  
+ 
+Safe: 
+ 
+```text 
+
+--- PAGE 62 ---
+RESET_FOR_START for start. 
+SEEK_TRANSACTION for seek.  
+``` 
+ 
+--- 
+ 
+## 12.5 Letting non-terminal events hide full legacy resets  
+ 
+Unsafe: 
+ 
+```text 
+Non-terminal canonical event ignored by coordinator,  
+but internal legacy Stop already reset transport state.  
+``` 
+ 
+Safe: 
+ 
+```text 
+Non-terminal events must not perform full transport resets.  
+Full resets must be explicit and terminal.  
+``` 
+ 
+--- 
+ 
+# Bottom line 
+ 
+
+--- PAGE 63 ---
+The likely regression is not primarily a Web Audio bug. It is a command -boundary and 
+state-machine bug introduced by Phase 20.  
+ 
+The unsafe pattern is: 
+ 
+```text 
+Play 
+  -> cache.status() 
+    -> isCurrent() 
+      -> MasterPlanSet.build() 
+        -> possible PlanSet replacement / side effects  
+          -> canonical start 
+            -> internal legacy Stop resets UI/time  
+              -> transport state and audio graph diverge  
+``` 
+ 
+The safe repair is: 
+ 
+```text 
+Make PlanSet status pure. 
+Make fingerprint comparison side-effect-free. 
+Make build/rebuild explicit stopped commands.  
+Split legacy full Stop from legacy cleanup -only. 
+Give canonical start its own RESET_FOR_START transaction. 
+Keep seek teardown non-terminal and transport-preserving. 
+Stop must always force a clean terminal state.  
+Rebuild must reset canonical transport to a known stopped state.  
+
+--- PAGE 64 ---
+``` 
+ 
+With those changes, Phase 20 can enforce stale -plan refusal without corrupting the 
+already validated Canonical Master Beta playback and Abort -and-Stabilize seek 
+behavior. 

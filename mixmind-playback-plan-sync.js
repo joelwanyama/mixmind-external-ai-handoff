@@ -1,0 +1,3 @@
+(function(){
+if(typeof window.renderTimeline!=='function'||typeof AudioEngine==='undefined')return;
+const old=window.renderTimeline;window.renderTimeline=function(){const r=old.apply(this,arguments),fresh=calculateTimelineDuration(),stale=AudioEngine.isPlaying&&Math.abs((Number(AudioEngine.totalDuration)||0)-fresh)>.1;if(stale){AudioEngine.stop();AudioEngine.totalDuration=fresh;AudioEngine.currentTime=0;if(typeof updateTimeDisplay==='function')updateTimeDisplay(0,fresh);if(typeof updateProgress==='function')updateProgress(0);if(typeof showToast==='function')showToast('Mix timing changed. Playback stopped so the next Play uses the updated timeline.','warning');}else if(!AudioEngine.isPlaying){AudioEngine.totalDuration=fresh;}return r;};})();

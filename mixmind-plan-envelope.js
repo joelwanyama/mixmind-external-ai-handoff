@@ -1,0 +1,12 @@
+/* Versioned, serializable PlanEnvelope for canonical cue/export parity work. */
+(function(){'use strict';
+function hash(s){let h=2166136261;for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619)}return(h>>>0).toString(16)}
+function ms(x){return Math.round((Number(x)||0)*1000)}
+function policy(){return Object.freeze({coordinate:'time-coordinate/1',interval:'interval-evidence/1',gate:'lite-gate/phase4',renderer:'cue-harness/1',fallback:'master-fallback/1'});}
+function inputs(a,b,pair,transition){return Object.freeze({outgoingTrackId:a.id,incomingTrackId:b.id,outgoingSourceStart:ms(pair.outgoing.start),incomingSourceStart:ms(pair.incoming.start),effectiveDuration:ms(pair.effectiveDuration),requestedDuration:ms(pair.requestedDuration),outgoingBpm:Number(a.bpm)||0,incomingBpm:Number(b.bpm)||0,outgoingMixStart:ms(typeof getTrackMixStart==='function'?getTrackMixStart(a):0),incomingMixStart:ms(typeof getTrackMixStart==='function'?getTrackMixStart(b):0),transitionType:transition&&transition.type||'Crossfade'});}
+function fingerprint(i,p){return hash(JSON.stringify({i,p}));}
+function make(a,b,transition,pair,gate,fallback){const p=policy(),i=inputs(a,b,pair,transition),f=fingerprint(i,p);return Object.freeze({schemaVersion:'mixmind.plan-envelope/1',planId:'lite-test-'+f,fingerprint:f,state:'SEALED',createdAt:Date.now(),policy:p,inputs:i,pair:Object.freeze({outgoingTrackId:a.id,incomingTrackId:b.id}),timing:Object.freeze({coordinateDomain:'source',outgoingSourceStart:pair.outgoing.start,incomingSourceStart:pair.incoming.start,effectiveDuration:pair.effectiveDuration,requestedDuration:pair.requestedDuration}),safePair:pair,intrinsic:Object.freeze({classification:'LITE_CANDIDATE',gate}),execution:Object.freeze({mode:'LITE',state:'LITE_TEST_SEALED',sourceBudget:3,normalPlaybackUnchanged:true}),fallback:Object.freeze(fallback||{mode:'MASTER',recipe:'Echo Out',reason:'Prebuilt Master fallback.'})});}
+function isCurrent(plan){if(!plan||plan.schemaVersion!=='mixmind.plan-envelope/1')return false;const a=(tracks||[]).find(t=>t.id===plan.pair.outgoingTrackId),b=(tracks||[]).find(t=>t.id===plan.pair.incomingTrackId);if(!a||!b)return false;const pair=plan.safePair,transition={type:plan.inputs.transitionType,duration:plan.timing.requestedDuration};return fingerprint(inputs(a,b,pair,transition),policy())===plan.fingerprint;}
+function snapshot(plan){return JSON.parse(JSON.stringify(plan));}
+window.MixMindPlanEnvelope=Object.freeze({make,isCurrent,snapshot,policy});
+})();

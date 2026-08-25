@@ -1,0 +1,1 @@
+(function(){async function boot(){try{const r=await fetch('/models/lite2/lite2.manifest.json',{cache:'no-store'});if(!r.ok)return;window.MixMindLite2Config=await r.json();console.info('MixMind: Lite 2-Stem runtime configured.')}catch(_){}}boot();})();
