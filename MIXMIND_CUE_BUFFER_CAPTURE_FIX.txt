@@ -1,0 +1,12 @@
+Cue Buffer Capture Fix
+
+The cue harness could read a timeline clone whose master buffer was null after
+repeated attempts. It now resolves the canonical library tracks, captures all
+three required buffers (outgoing master, incoming instrumental, incoming master)
+before it stops anything, and schedules only from those captured references.
+
+If audio truly cannot be hydrated it will show a clear error instead of
+“Cannot read properties of null (reading duration)”.
+
+Install, reload, seal the matching pair, run one cue to completion. Do not test
+Stop until there is no Last error.

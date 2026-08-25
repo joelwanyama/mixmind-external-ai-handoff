@@ -1,0 +1,12 @@
+Cue Script Version 2 Cache Fix
+
+The browser had already cached cuebus-20260813-1 before the cue-session bus
+fields were added. This update changes the URL to:
+  mixmind-cue-test-harness.js?v=cuebus-20260813-2
+
+Copy index.html and mixmind-cue-test-harness.js into E:\job\mixmind, replace
+files, restart using RESET_AND_START_MIXMIND_WINDOWS.bat, and hard refresh.
+The server log must show a request containing:
+  mixmind-cue-test-harness.js?v=cuebus-20260813-2
+
+The cue panel must then display Cue output connected and Cue RMS.

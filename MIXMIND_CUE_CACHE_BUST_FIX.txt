@@ -1,0 +1,10 @@
+Cue Cache-Bust Fix
+
+The browser continued loading an older mixmind-cue-test-harness.js from cache.
+This index.html now loads it with a unique version query:
+  mixmind-cue-test-harness.js?v=cuebus-20260813-1
+
+Copy index.html and mixmind-cue-test-harness.js into the actual main MixMind
+folder, replace files, restart server, and open MixMind. The cue panel must show:
+  Cue output connected: yes/no
+  Cue RMS: 0.xxxxx

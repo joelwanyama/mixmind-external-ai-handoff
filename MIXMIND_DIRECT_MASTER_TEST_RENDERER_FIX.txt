@@ -1,0 +1,8 @@
+Direct Master Test Renderer Fix
+
+The visible toolbar button no longer depends on mixmind-canonical-master-test-ui.js.
+It directly calls MixMindCanonicalMasterRenderer with the current two-song
+Timeline and forceMaster=true.
+
+Copy index.html into E:\job\mixmind, replace, restart server, hard refresh,
+then click Test Master Plan.

@@ -1,0 +1,8 @@
+Static Master Test Button Fix
+
+This update puts Test Master Plan directly into the existing static top toolbar
+HTML, immediately after Analyze Lite Activity. It does not rely on dynamic DOM
+insertion, observers, retries, or toolbar timing.
+
+Copy index.html into E:\job\mixmind, replace it, restart server, hard refresh.
+The button must be visibly present even before any scripts run.

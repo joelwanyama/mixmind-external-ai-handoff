@@ -1,0 +1,11 @@
+Cue Status Display Fix
+
+Confirmed correction: the cue-session bus existed, but the displayed cue panel
+forgot to print its connection/RMS fields. This patch adds them and loads cue
+script version cuebus-20260813-3.
+
+Copy index.html and mixmind-cue-test-harness.js into E:\job\mixmind, replace
+both, restart with RESET_AND_START_MIXMIND_WINDOWS.bat, then Ctrl+Shift+R.
+The server log must request cuebus-20260813-3. The cue panel will show:
+Cue output connected: yes/no
+Cue RMS: 0.xxxxx

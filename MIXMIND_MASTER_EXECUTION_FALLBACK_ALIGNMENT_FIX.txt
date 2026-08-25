@@ -1,0 +1,10 @@
+Master Execution/Fallback Alignment Fix
+
+The Master Plan Audit found a contradiction:
+Execution said master-crossfade while the same plan's safe fallback said Echo Out.
+This update makes a Master plan execute its prebuilt fallback recipe whenever
+Master is selected. The audit should now show:
+Execution: master / Echo Out
+Fallback: Echo Out
+
+This changes canonical plan data only. Normal legacy playback is still unchanged.

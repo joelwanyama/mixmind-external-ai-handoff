@@ -1,0 +1,8 @@
+Scan Lite Pairs Button Restore Fix
+
+Phase 12 accidentally used Scan Lite Pairs as the button-install anchor, so on
+a fresh page the button could not create itself. This fix anchors the scanner
+beside Analyze Lite Activity (or Auto-Sort if needed).
+
+Copy index.html and mixmind-lite-candidate-finder.js to E:\job\mixmind, replace,
+restart, and hard refresh. The server should request scan-20260814-1.

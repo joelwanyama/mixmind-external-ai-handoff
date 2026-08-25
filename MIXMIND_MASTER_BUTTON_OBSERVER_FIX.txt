@@ -1,0 +1,8 @@
+Master Button Observer Fix
+
+The Master test button could miss the toolbar because it was inserted before the
+toolbar finished rendering. This version anchors beside Analyze Lite Activity and
+retries with MutationObserver plus short timed retries.
+
+After restart/hard refresh, Test Master Plan must appear beside Analyze Lite
+Activity. Server URL ends toolbar-master-20260814-2.

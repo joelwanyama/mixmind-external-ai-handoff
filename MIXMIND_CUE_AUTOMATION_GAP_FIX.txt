@@ -1,0 +1,12 @@
+Cue Automation Gap Fix
+
+The previous fix ended the underlay gain curve exactly where the final fade began.
+This browser still treats that exact boundary as overlapping automation.
+
+This update ends the curve 10ms before the final 20ms fade begins. The 10ms gap
+holds the underlay at its final curve value, then the fade starts. This removes
+conflicting AudioParam automation without changing source timing, plan timing,
+or drift-limited duration.
+
+Do not test Stop yet. First run one cue to completion and confirm the panel has
+no Last error. Only then test Stop.

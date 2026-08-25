@@ -1,0 +1,5 @@
+Transport Counter Fix
+
+Adds counters around internal legacy Stop and Seek aliases. Audio behavior is
+unchanged. After normal Play/Stop/Seek, Transport Audit should now show:
+legacyStopInternal > 0 and legacySeekInternal > 0.

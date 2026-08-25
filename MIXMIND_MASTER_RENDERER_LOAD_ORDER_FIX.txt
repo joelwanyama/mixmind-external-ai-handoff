@@ -1,0 +1,14 @@
+Master Renderer Load-Order Fix
+
+The direct binding correctly found that MixMindCanonicalMasterRenderer was
+unavailable. Cause: its file loaded before MixMindSourceLedger, so it returned
+without initializing.
+
+This index loads the ledger before the Master renderer and adds fresh script
+URLs:
+  mixmind-source-ledger.js?v=master-ledger-20260815-1
+  mixmind-canonical-master-renderer.js?v=master-renderer-20260815-1
+
+Copy index.html, mixmind-source-ledger.js, mixmind-canonical-master-renderer.js,
+and mixmind-master-test-binding.js into E:\job\mixmind. Restart, hard refresh,
+then Test Master Plan again.

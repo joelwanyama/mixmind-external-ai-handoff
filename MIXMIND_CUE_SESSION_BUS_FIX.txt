@@ -1,0 +1,12 @@
+Cue Session Bus Isolation Fix
+
+All three cue sources now route through a dedicated cue-session bus rather than
+directly into AudioEngine.masterGain.
+
+On Stop, MixMind first disconnects the cue output bus from master gain, then
+stops sources at time 0, cancels automation, disconnects chains, and clears the
+session. The panel shows Cue output connected and Cue RMS.
+
+Test only Stop during PRE-ROLL first. After Stop, wait 15 seconds and send a
+screenshot showing State STOPPED, Cue output connected no, Cue RMS 0.00000,
+and Sources 0/3.

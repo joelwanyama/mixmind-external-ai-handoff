@@ -1,0 +1,12 @@
+Cue Automation Overlap Fix
+
+The cue test correctly exposed a Web Audio exception: incoming instrumental
+setValueCurveAtTime extended through takeover while a new fade-out began before
+that curve ended. Browsers reject overlapping AudioParam automation.
+
+This update ends the underlay gain curve 20ms before takeover, then uses the
+last 20ms for the separate fade to zero. It does not alter the sealed musical
+boundary, drift limit, source count, or normal playback.
+
+Install, hard-refresh, scan, seal the Cigarettes -> All Girls candidate, then
+Start/Restart once. Send the cue panel screenshot whether it starts or errors.

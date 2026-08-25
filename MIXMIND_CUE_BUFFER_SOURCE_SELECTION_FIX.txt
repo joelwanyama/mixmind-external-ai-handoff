@@ -1,0 +1,10 @@
+Cue Buffer Source Selection Fix
+
+The reverse pair failed before audio scheduling because the harness chose a
+library track copy that did not contain a valid master AudioBuffer. It now
+prefers the library copy only when its buffer is valid; otherwise it uses the
+matching timeline copy. It validates outgoing master, incoming master, and
+incoming instrumental before scheduling.
+
+Install index.html and mixmind-cue-test-harness.js into E:\job\mixmind, restart,
+and verify server requests cuebus-20260813-5. Then retest the reverse plan only.

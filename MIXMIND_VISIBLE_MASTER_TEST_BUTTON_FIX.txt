@@ -1,0 +1,8 @@
+Visible Master Test Button Fix
+
+The old canonical Master test button was attached only to an older Home player
+card. This update also adds Test Master Plan beside Audit Master Plans in the
+visible top toolbar when exactly two timeline songs exist.
+
+Install index.html and mixmind-canonical-master-test-ui.js, restart, hard
+refresh, then click Test Master Plan in the toolbar.

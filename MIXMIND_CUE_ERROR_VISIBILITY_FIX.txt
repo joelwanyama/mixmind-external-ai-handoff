@@ -1,0 +1,9 @@
+Cue Test Error Visibility Fix
+
+The cue panel now shows the exact sealed plan ID, pair IDs, and permanent Last
+error text inside the panel. The obsolete full-song “Run Latest Sealed Lite Test”
+button is removed.
+
+Install this ZIP, restart/hard refresh, scan pairs, seal the candidate matching
+the visible timeline order (Cigarettes -> All Girls Are The Same), then press
+Start / Restart once. Send a screenshot of the cue panel including Last error.

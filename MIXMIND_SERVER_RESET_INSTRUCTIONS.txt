@@ -1,0 +1,18 @@
+Why this is needed
+Your cue panel is still showing the old cue JavaScript, even after a complete
+replacement package. The most likely cause is that an older local server is
+still serving a different MixMind folder on localhost port 8765.
+
+Use this file from the SAME main MixMind folder that contains index.html:
+  RESET_AND_START_MIXMIND_WINDOWS.bat
+
+It closes any program currently listening on port 8765, then starts MixMind from
+the exact folder containing this file. After Edge opens, press Ctrl+Shift+R.
+
+Verification
+The new cue panel must show:
+  Cue output connected: yes/no
+  Cue RMS: 0.xxxxx
+
+If these fields are still absent, send a screenshot of the black server window
+showing the line "Starting MixMind from this folder:" and the folder path.

@@ -1,0 +1,10 @@
+Cue Stop Pointer-Down Fix
+
+The Stop count proved that the Stop click never reached its handler while the
+cue panel was being rebuilt every animation frame. The Stop control is now a
+red STOP CUE NOW button that invokes Stop on pointer-down, before a render can
+replace the button. A normal click remains as fallback.
+
+Install index.html and mixmind-cue-test-harness.js into E:\job\mixmind, restart,
+then verify server requests cuebus-20260813-4. During PRE-ROLL, press the red
+STOP CUE NOW once. Stops must change from 1 to 2 immediately.

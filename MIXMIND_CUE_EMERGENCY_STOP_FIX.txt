@@ -1,0 +1,14 @@
+Cue Emergency Stop Fix
+
+The cue Stop control failed. This update makes Stop an explicit emergency
+teardown rather than relying only on the ledger:
+- increments the session token, invalidating future scheduling;
+- calls stop(current AudioContext time) on every cue source;
+- cancels gain automation and sets gain to zero;
+- disconnects source, gain, and filter chains;
+- clears the ledger;
+- shows a Stops count in the cue panel.
+
+Install, seal the matching plan, start the cue, press Stop during PRE-ROLL, and
+send a screenshot showing State STOPPED, Sources 0/3, and Stops incremented.
+Wait 15 seconds to confirm no scheduled incoming audio appears.

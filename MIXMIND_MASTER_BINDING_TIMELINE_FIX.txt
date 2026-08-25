@@ -1,0 +1,8 @@
+Master Binding Timeline Fix
+
+The test binding used window.timeline/window.transitions. MixMind stores its
+active variables as lexical timeline/transitions, so the visible two-song mixer
+could still appear as zero to the binding. This update uses the real variables.
+
+Copy index.html and mixmind-master-test-binding.js to E:\job\mixmind, replace,
+restart, hard refresh. The server requests master-binding-20260815-2.
