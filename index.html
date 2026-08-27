@@ -17564,8 +17564,8 @@ console.log('MixMind v4 Item 9: Tiered analysis depth + Short-audio warnings + D
 <script src="mixmind-master-plan-set.js?v=master-planset-20260815-2"></script>
 <script src="mixmind-master-plan-set-cache.js?v=master-plancache-20260815-3"></script>
 <script src="mixmind-three-track-master-harness.js?v=three-master-20260815-2"></script>
-<script src="mixmind-canonical-master-beta.js?v=master-beta-20260815-6"></script>
-<script src="mixmind-beta-jit-tracer.js?v=jit-trace-20260815-1"></script>
+<script src="mixmind-canonical-master-beta.js?v=master-beta-20260827-8"></script>
+<script src="mixmind-beta-jit-tracer.js?v=jit-trace-20260827-2"></script>
 <script src="mixmind-main-playback-coordinator.js?v=main-coordinator-20260815-2"></script>
 <script src="mixmind-main-playback-internals.js?v=main-internals-20260815-1"></script>
 <script src="mixmind-legacy-transport-internal.js?v=legacy-internal-20260815-2"></script>
@@ -17576,5 +17576,17 @@ console.log('MixMind v4 Item 9: Tiered analysis depth + Short-audio warnings + D
 <script src="mixmind-cue-test-harness.js?v=cuebus-20260814-1"></script>
 <script src="mixmind-sealed-cue-export.js"></script>
 <script src="mixmind-lite-candidate-finder.js?v=scan-20260814-1"></script>
+<script>
+/* Phase 22B: the Canonical toggle's choice persists in localStorage (mixmind.canonicalMasterBeta.settings.v1),
+   but the static button label always rendered "OFF" after a reload while the engine already ran Canonical.
+   Sync the label to the saved setting at load. */
+document.addEventListener('DOMContentLoaded',function(){
+  try{
+    var b=document.getElementById('canonicalMasterModeBtn');
+    var s=window.MixMindMainPlaybackCoordinator&&window.MixMindMainPlaybackCoordinator.getSettings();
+    if(b&&s)b.textContent='Canonical Master: '+(s.canonicalMasterPlaybackBeta?'ON':'OFF');
+  }catch(_){}
+});
+</script>
 </body>
 </html>
